@@ -297,10 +297,13 @@ class Item:
 
 
 def plain(text: Any, limit: int) -> str:
-    """Markdown-ish text flattened to one tidy paragraph for a chat message."""
-    out = re.sub(r'\*\*|__|`', '', str(text or ''))
-    out = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', out)
-    out = re.sub(r'\s*\n\s*', ' ', out).strip()
+    """Markdown-ish text flattened to one tidy paragraph for a chat message. Agents write this
+    text, so it's cut to a bounded length before any pattern runs, and the patterns are bounded
+    too: a huge field can't stall the bot."""
+    out = str(text or '')[: limit * 4 + 2000]
+    out = re.sub(r'\*\*|__|`', '', out)
+    out = re.sub(r'\[([^\]\n]{1,500})\]\([^)\s]{1,2000}\)', r'\1', out)
+    out = ' '.join(part.strip() for part in out.splitlines() if part.strip())
     return out if len(out) <= limit else out[: limit - 1].rstrip() + '…'
 
 
@@ -904,7 +907,8 @@ class SlackChat:
             {
                 'channel': self.channel,
                 # notification text; mentions below buzz
-                'text': f'{"Question for you" if item.key.startswith("q:") else "Approval needed"}: {item.title}',
+                'text': f'{"Question for you" if item.key.startswith("q:") else "Approval needed"}: '
+                f'{slack_escape(item.title)}',
                 'blocks': slack_blocks(item, mentions),
                 'unfurl_links': False,
                 'unfurl_media': False,
@@ -918,7 +922,7 @@ class SlackChat:
             {
                 'channel': ref[0],
                 'ts': ref[1],
-                'text': f'{item.title}: {outcome}',
+                'text': f'{slack_escape(item.title)}: {slack_escape(outcome)}',
                 'blocks': slack_blocks(item, [], outcome),
             },
         )
