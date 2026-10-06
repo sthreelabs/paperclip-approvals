@@ -167,4 +167,7 @@ Provided as-is under the MIT license. It runs in production for its authors, and
 when they need them. Issues and pull requests are welcome, but there's no promise of support or of
 keeping up with every Paperclip release.
 
+A community tool, not affiliated with or endorsed by Paperclip. "Paperclip" refers to the
+open-source project at [paperclipai/paperclip](https://github.com/paperclipai/paperclip).
+
 Made by [sthreelabs](https://sthreelabs.com), a small studio that builds AI teams for small businesses.
