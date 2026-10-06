@@ -1,0 +1,1 @@
+slack_sdk==3.45.0  # Slack Socket Mode client; the Telegram mode needs only the standard library

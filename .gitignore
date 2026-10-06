@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+.pytest_cache/
+*.env
+!config.example.env
+approvers.json
+state.json
+state.tmp
+audit.jsonl
+bot.log
