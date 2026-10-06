@@ -1,0 +1,3 @@
+[
+  {"name": "Alex", "telegram_id": 100000001, "key_env": "PAPERCLIP_BOARD_KEY", "kinds": ["board", "card"]}
+]

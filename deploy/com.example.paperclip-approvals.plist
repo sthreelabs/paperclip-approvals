@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- launchd job for the Paperclip approvals bot (macOS). Edit the paths, copy to ~/Library/LaunchAgents/,
+     then: launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.example.paperclip-approvals.plist
+     Secrets live in the env files (mode 600), never in this file. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.example.paperclip-approvals</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/path/to/paperclip-approvals/.venv/bin/python</string>
+    <string>/path/to/paperclip-approvals/approvals.py</string>
+    <string>--env-file</string><string>/path/to/secrets.env</string>
+    <string>--env-file</string><string>/path/to/config.env</string>
+  </array>
+  <key>WorkingDirectory</key><string>/path/to/paperclip-approvals</string>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>30</integer>
+  <key>StandardErrorPath</key><string>/path/to/paperclip-approvals/bot.log</string>
+  <key>StandardOutPath</key><string>/path/to/paperclip-approvals/bot.log</string>
+</dict>
+</plist>
