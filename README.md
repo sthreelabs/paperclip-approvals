@@ -10,6 +10,25 @@ Paperclip ──(poll every 20 s, read-only key)──▶ bot ──▶ Slack ch
     └──(decision made with the approver's own key)◀── button press or answer form
 ```
 
+## What it looks like
+
+An agent asks to hire someone. Anyone on the approver list can decide from Slack:
+
+<img src="docs/approval.png" width="520" alt="Slack message: Hire: Robin, Landing Page Designer, with budget and summary, and Approve / Not now buttons">
+
+An agent has questions. **Answer** opens a form with its choices, and the answers go back to Paperclip:
+
+<img src="docs/question.png" width="520" alt="Slack message listing two questions from an agent, with an Answer button">
+
+<img src="docs/answer-form.png" width="380" alt="Slack form: one question as radio buttons with a free-text box, one as checkboxes, and a Send answers button">
+
+Once decided, the message says who decided and the buttons go away:
+
+<img src="docs/decided.png" width="520" alt="Slack message for a confirmation card, marked Approved by Alex">
+
+<sub>Rendered from the bot's own message code with example data, using Slack's Block Kit Builder. In
+your workspace the sender shows as your app's name instead of "Your App".</sub>
+
 ## Why
 
 Paperclip's built-in chat connectors are webhook-based, so Paperclip needs a public HTTPS address.
