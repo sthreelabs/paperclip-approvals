@@ -497,7 +497,7 @@ def test_a_label_names_the_company_on_every_item(slack_bot):
     b.cfg.label = 'Acme'
     b.sync()
     [post] = api.of('chat.postMessage')
-    assert post['text'] == 'Approval needed: Acme · OK to send <the hello>?'
+    assert post['text'] == 'Approval needed: Acme · OK to send &lt;the hello&gt;?'
     assert '*Acme · OK to send &lt;the hello&gt;?*' in post['blocks'][0]['text']['text']
 
 
@@ -674,3 +674,35 @@ def test_telegram_shows_question_cards_with_a_paperclip_link_and_no_buttons(bot)
     assert sorted(s[0] for s in sent) == [SAM, ME]  # cards go to every card approver
     assert all(s[2] == [] for s in sent) and 'answer in Paperclip' in sent[0][1]
     assert '1. Who is this deck for?' in sent[0][1]
+
+
+# --- hardening after a security review --------------------------------------------------------------
+def test_slack_notification_text_escapes_agent_markup(slack_bot):
+    # The notification text is parsed as mrkdwn too: an agent-written title can't ping the channel
+    # or fake a link there.
+    b, pc, api = slack_bot
+    pc.card_map['i38'][0]['payload']['prompt'] = '<!channel> <https://evil.example|Re-login> & go'
+    b.sync()
+    [post] = api.of('chat.postMessage')
+    assert '<!channel>' not in post['text'] and '<https://evil' not in post['text']
+    assert '&lt;!channel&gt; &lt;https://evil.example|Re-login&gt; &amp; go' in post['text']
+    slack_press(b, SLACK_ME, 'y|c:card1')
+    [upd] = api.of('chat.update')
+    assert '<!channel>' not in upd['text'] and '&lt;!channel&gt;' in upd['text']
+
+
+def test_plain_stays_fast_and_bounded_on_huge_agent_text():
+    import time
+    start = time.monotonic()
+    for evil in (' ' * 300_000, '[' * 300_000, '[a](' * 100_000, ('x ' * 50_000 + '\n') * 3):
+        out = ap.plain(evil, 700)
+        assert len(out) <= 700
+    assert time.monotonic() - start < 2.0
+
+
+def test_plain_keeps_its_formatting_rules():
+    assert ap.plain('**Bold** and `code`\n\n  next [link](https://x.example/a b) line', 200) == (
+        'Bold and code next [link](https://x.example/a b) line')
+    assert ap.plain('see [the doc](https://x.example/doc)\nthen  done', 200) == 'see the doc then  done'
+    assert ap.plain('x' * 50, 10) == 'x' * 9 + '…'
+    assert ap.plain(None, 10) == ''
