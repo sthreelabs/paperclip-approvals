@@ -22,6 +22,10 @@ machine running it like the approvers' own sessions:
   an approver's Slack or Telegram account can approve as them. Use your chat app's own protections
   (SSO, 2FA) accordingly.
 - **Paperclip**, as the source of truth: every press is re-checked against Paperclip before acting.
+- **Agent-made files**, only when `APPROVALS_REVIEW_FILES=on`: the bot downloads a review task's
+  attachments with the reader key and uploads them, unopened, to your Slack channel. It never runs or
+  parses them, and caps their number and size. Their names are cut to a plain base name. Anyone in
+  the channel can download them, so leave the option off if task files shouldn't live in Slack.
 
 It does not trust message text. There's no AI in the bot and no command parsing beyond Telegram's
 `/start`.

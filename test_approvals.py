@@ -26,6 +26,9 @@ class FakePaperclip:
         self.dismissed = []
         self.fail = False
         self.fail_dismiss = False
+        self.files = {}  # issue id -> attachment list
+        self.blobs = {}  # attachment id -> bytes
+        self.fail_files = False
 
     def call(self, key, method, path, body=None):
         if self.fail:
@@ -67,6 +70,19 @@ class FakePaperclip:
 
     def prefix(self, key):
         return 'ACME'
+
+    def attachments(self, key, issue_id):
+        if self.fail_files:
+            raise ap.ApiError('files down')
+        return self.files.get(issue_id, [])
+
+    def subtasks(self, key, issue_id):
+        if self.fail_files:
+            raise ap.ApiError('files down')
+        return [i for i in self.issues.values() if i.get('parentId') == issue_id]
+
+    def download(self, key, attachment_id, limit):
+        return self.blobs[attachment_id]
 
 
 class FakeTelegram:
@@ -373,12 +389,25 @@ SLACK_ME, SLACK_OTHER = 'U0APPROVER1', 'U0STRANGER'
 class FakeSlackApi:
     def __init__(self):
         self.calls = []
+        self.refuse = set()  # file names whose upload Slack refuses
 
     def call(self, method, body):
         self.calls.append((method, body))
         if method == 'chat.postMessage':
             return {'ok': True, 'channel': body['channel'], 'ts': f'17.{len(self.calls)}'}
         return {'ok': True}
+
+    def form(self, method, fields):
+        self.calls.append((method, fields))
+        if method == 'files.getUploadURLExternal':
+            if fields['filename'] in self.refuse:
+                raise ap.ApiError('Slack files.getUploadURLExternal failed: missing_scope')
+            return {'ok': True, 'upload_url': f'https://files.example/{fields["filename"]}',
+                    'file_id': f'F-{fields["filename"]}'}
+        return {'ok': True}
+
+    def upload(self, url, data):
+        self.calls.append(('upload', {'url': url, 'data': data}))
 
     def of(self, method):
         return [b for m, b in self.calls if m == method]
@@ -799,3 +828,146 @@ def test_config_reads_review_kind_and_paperclip_user_id(tmp_path):
     cfg = ap.load_config({'TELEGRAM_BOT_TOKEN': 't', 'PAPERCLIP_API_URL': 'https://p', 'PAPERCLIP_COMPANY_ID': 'co',
                           'APPROVERS_FILE': str(approvers), 'READER_KEY_ENV': 'K1', 'K1': 's'})
     assert cfg.approvers[0].kinds == {'card', 'review'} and cfg.approvers[0].paperclip_user_id == PC_ME
+
+
+# --- review files -----------------------------------------------------------------------
+def att(aid, name, run, at, agent='lead', size=100):
+    return {'id': aid, 'originalFilename': name, 'originatingRunId': run, 'createdAt': at,
+            'createdByAgentId': agent, 'byteSize': size}
+
+
+def with_files(b, pc, files):
+    with_review(b, pc)
+    b.cfg.review_files = True
+    pc.files['i86'] = files
+    for f in files:
+        pc.blobs[f['id']] = f'bytes of {f["originalFilename"]}'.encode()
+
+
+def uploaded(api):
+    return [json.loads(c['files'])[0]['title'] for c in api.of('files.completeUploadExternal')]
+
+
+def test_review_notice_gets_the_latest_handoffs_files_in_its_thread(slack_bot):
+    b, pc, api = slack_bot
+    with_files(b, pc, [
+        att('a1', 'deck-v3.pptx', 'run3', '2026-09-27T12:28'),
+        att('a2', 'cheatsheet-v3.pptx', 'run3', '2026-09-27T12:28'),
+        att('a3', 'deck-v4.pptx', 'run4', '2026-09-27T13:37'),
+        att('a4', 'cheatsheet-v4.pptx', 'run4', '2026-09-27T13:37'),
+        {**att('a5', 'notes-from-a-person.docx', None, '2026-09-28T09:00'), 'createdByAgentId': None},
+    ])
+    b.sync()
+    [notice] = [p for p in api.of('chat.postMessage') if 'launch deck' in p['text']]
+    assert uploaded(api) == ['deck-v4.pptx', 'cheatsheet-v4.pptx']
+    thread = b.state['items']['r:i86']['messages'][0]
+    for done in api.of('files.completeUploadExternal'):
+        assert [done['channel_id'], done['thread_ts']] == thread
+    assert [c['data'] for c in api.of('upload')] == [b'bytes of deck-v4.pptx', b'bytes of cheatsheet-v4.pptx']
+    assert not [p for p in api.of('chat.postMessage') if p.get('thread_ts')]  # nothing left over
+    b.sync()
+    assert len(api.of('files.completeUploadExternal')) == 2  # once per hand-off
+
+
+def test_files_on_subtasks_come_too_with_each_tasks_latest_handoff(slack_bot):
+    # The lead puts the parent in review; the designer's deck sits on a subtask.
+    b, pc, api = slack_bot
+    with_files(b, pc, [])
+    kids = {
+        'i88': ('2026-10-08T00:10', 'done', [att('d1', 'deck-v1.pptx', 'r1', '2026-10-08T00:30'),
+                                             att('d2', 'deck-v2.pptx', 'r2', '2026-10-08T00:53')]),
+        'i87': ('2026-10-08T00:05', 'done', [att('s1', 'sheet.pptx', 'r3', '2026-10-08T01:00')]),
+        'i89': ('2026-10-08T00:20', 'cancelled', [att('x1', 'dropped.pptx', 'r4', '2026-10-08T02:00')]),
+    }
+    for iid, (created, status, files) in kids.items():
+        pc.issues[iid] = {'id': iid, 'identifier': iid.upper(), 'status': status, 'parentId': 'i86',
+                          'createdAt': created, 'title': 'sub'}
+        pc.files[iid] = files
+        for f in files:
+            pc.blobs[f['id']] = b'x'
+    b.sync()
+    assert uploaded(api) == ['sheet.pptx', 'deck-v2.pptx']
+
+
+def test_files_on_the_review_task_itself_win_over_its_subtasks(slack_bot):
+    # v4 on the parent, the first draft still on the design subtask.
+    b, pc, api = slack_bot
+    with_files(b, pc, [att('p4', 'deck-v4.pptx', 'r4', '2026-09-27T13:37')])
+    pc.issues['i8'] = {'id': 'i8', 'identifier': 'ACME-8', 'status': 'done', 'parentId': 'i86', 'title': 'sub'}
+    pc.files['i8'] = [att('d1', 'deck-draft.pptx', 'r1', '2026-09-26T18:32')]
+    pc.blobs['d1'] = b'x'
+    b.sync()
+    assert uploaded(api) == ['deck-v4.pptx']
+
+
+def test_review_files_are_off_unless_turned_on(slack_bot):
+    b, pc, api = slack_bot
+    with_files(b, pc, [att('a1', 'deck.pptx', 'run1', '2026-10-08T09:00')])
+    b.cfg.review_files = False
+    b.sync()
+    assert any('launch deck' in p['text'] for p in api.of('chat.postMessage'))
+    assert not api.of('files.getUploadURLExternal')
+
+
+def test_a_review_without_agent_files_attaches_nothing(slack_bot):
+    b, pc, api = slack_bot
+    with_files(b, pc, [{**att('a1', 'mine.docx', None, '2026-10-08T09:00'), 'createdByAgentId': None}])
+    b.sync()
+    assert not api.of('files.getUploadURLExternal')
+    assert not [p for p in api.of('chat.postMessage') if p.get('thread_ts')]
+
+
+def test_files_over_the_limits_are_named_with_a_link_instead(slack_bot):
+    b, pc, api = slack_bot
+    files = [att(f'a{i}', f'part-{i}.pdf', 'run1', f'2026-10-08T09:0{i}') for i in range(7)]
+    files[1]['byteSize'] = ap.REVIEW_FILE_BYTES + 1
+    with_files(b, pc, files)
+    b.sync()
+    assert uploaded(api) == ['part-0.pdf', 'part-2.pdf', 'part-3.pdf', 'part-4.pdf']
+    [note] = [p for p in api.of('chat.postMessage') if p.get('thread_ts')]
+    assert note['text'] == ('Also on the task: part-1.pdf (too big to attach), part-5.pdf, part-6.pdf. '
+                            '<https://p.example/ACME/issues/ACME-86|Open the task in Paperclip>')
+
+
+def test_a_failed_upload_is_named_and_the_notice_stands(slack_bot):
+    b, pc, api = slack_bot
+    with_files(b, pc, [att('a1', 'deck.pptx', 'run1', '2026-10-08T09:00'),
+                       att('a2', 'sheet.pptx', 'run1', '2026-10-08T09:00')])
+    api.refuse = {'deck.pptx'}
+    b.sync()
+    assert uploaded(api) == ['sheet.pptx']
+    [note] = [p for p in api.of('chat.postMessage') if p.get('thread_ts')]
+    assert note['text'].startswith('Also on the task: deck.pptx (could not attach).')
+    b.sync()
+    assert len([p for p in api.of('chat.postMessage') if 'launch deck' in p['text']]) == 1
+
+
+def test_files_unreadable_in_paperclip_leave_just_the_notice(slack_bot):
+    b, pc, api = slack_bot
+    with_files(b, pc, [att('a1', 'deck.pptx', 'run1', '2026-10-08T09:00')])
+    pc.fail_files = True
+    b.sync()
+    assert any('launch deck' in p['text'] for p in api.of('chat.postMessage'))
+    assert not api.of('files.getUploadURLExternal') and b.state['items']['r:i86']['done'] is False
+
+
+def test_telegram_never_attaches_review_files(bot):
+    b, pc, tg = bot
+    with_files(b, pc, [att('a1', 'deck.pptx', 'run1', '2026-10-08T09:00')])
+    b.sync()
+    assert any('launch deck' in s[1] for s in tg.sent)
+
+
+def test_file_names_are_kept_plain():
+    assert ap.file_name({'id': 'abcdef123', 'originalFilename': '../../etc/pass\nwd\x07.pptx'}) == '....etcpasswd.pptx'
+    assert ap.file_name({'id': 'abcdef123', 'originalFilename': ''}) == 'file-abcdef12'
+    assert len(ap.file_name({'id': 'x', 'originalFilename': 'a' * 300 + '.pptx'})) == 120
+
+
+def test_config_reads_the_review_files_switch(tmp_path):
+    approvers = tmp_path / 'approvers.json'
+    approvers.write_text(json.dumps([{'name': 'C', 'telegram_id': 1, 'key_env': 'K1', 'kinds': ['review']}]))
+    env = {'TELEGRAM_BOT_TOKEN': 't', 'PAPERCLIP_API_URL': 'https://p', 'PAPERCLIP_COMPANY_ID': 'co',
+           'APPROVERS_FILE': str(approvers), 'READER_KEY_ENV': 'K1', 'K1': 's'}
+    assert ap.load_config(env).review_files is False
+    assert ap.load_config({**env, 'APPROVALS_REVIEW_FILES': 'on'}).review_files is True

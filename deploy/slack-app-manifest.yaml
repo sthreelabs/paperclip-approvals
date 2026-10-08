@@ -1,6 +1,7 @@
 # Slack app for the Paperclip approvals bot. Paste at api.slack.com/apps > Create New App > From a manifest.
-# Socket Mode: Slack never calls us, so nothing is exposed. Only chat:write (post, edit, private
-# replies); no event subscriptions, so the app can't read messages.
+# Socket Mode: Slack never calls us, so nothing is exposed. chat:write (post, edit, private
+# replies) and files:write (review files in a notice's thread); no event subscriptions, so the
+# app can't read messages.
 display_information:
   name: Approvals
   description: Paperclip approvals with Approve / Not now buttons and answer forms
@@ -13,6 +14,7 @@ oauth_config:
   scopes:
     bot:
       - chat:write
+      - files:write
 settings:
   interactivity:
     is_enabled: true
