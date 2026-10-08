@@ -10,6 +10,9 @@ What it shows (polled every POLL_SECONDS):
   board  pending board approvals: hires, budgets, strategy (GET /companies/:id/approvals)
   card   pending confirmation cards on any open task, e.g. an agent's "OK to send?", and question
          cards a teammate raised for a person (ask_user_questions)
+  review a task a teammate put In review and assigned to a person. Posted once with a link and no
+         buttons (reviewing means opening the work), closed when the task leaves review, and
+         posted again if it comes back to review later
 
 Where it posts:
   telegram  a direct message to each approver allowed that kind
@@ -40,7 +43,8 @@ Configuration (environment, never logged):
   PAPERCLIP_PUBLIC_URL     base for links (defaults to PAPERCLIP_API_URL)
   PAPERCLIP_COMPANY_ID     the company to watch
   APPROVERS_FILE           JSON list: [{"name", "telegram_id" or "slack_user_id", "key_env",
-                           "kinds": ["board", "card"]}]
+                           "kinds": ["board", "card", "review"], "paperclip_user_id" (optional:
+                           review items then mention this approver only for their own reviews)}]
   READER_KEY_ENV           name of the env var holding the key used to list items (a board key)
   APPROVALS_STATE_FILE     JSON state (messages sent, update offset); default ./approvals-state.json
   APPROVALS_AUDIT_FILE     JSON lines, one per decision; default ./approvals-audit.jsonl
@@ -74,7 +78,7 @@ from zoneinfo import ZoneInfo
 POLL_SECONDS = 20
 NOT_NOW_REASON = 'Not now (declined in chat via the approvals bot).'
 TIMEOUT = 15
-KINDS = {'board', 'card'}
+KINDS = {'board', 'card', 'review'}
 CHATS = {'telegram', 'slack'}
 OPEN_STATUSES = 'backlog,todo,in_progress,in_review,blocked'
 DETAILS_MAX = 700
@@ -197,6 +201,7 @@ class Approver:
     chat_id: Any  # Telegram user ID (int) or Slack user ID ('U…')
     key: str = field(repr=False)
     kinds: set[str]
+    paperclip_user_id: str = ''  # optional; limits review items to this person's own reviews
 
 
 @dataclass
@@ -251,6 +256,7 @@ def load_config(env: dict[str, str] | None = None) -> Config:
                 chat_id=chat_id,
                 key=need(entry['key_env']),
                 kinds=kinds,
+                paperclip_user_id=str(entry.get('paperclip_user_id') or ''),
             )
         )
     if not approvers:
@@ -286,14 +292,16 @@ def load_env_file(path: str) -> None:
 # --- items ----------------------------------------------------------------------------------------
 @dataclass
 class Item:
-    key: str  # 'a:<approval id>', 'c:<card id>' or 'q:<question card id>' (fits Telegram's 64 bytes)
-    kind: str  # 'board' or 'card' (question cards are cards: the same approvers answer them)
+    key: str  # 'a:<approval id>', 'c:<card id>', 'q:<question card id>' or 'r:<issue id>'
+    # (fits Telegram's 64 bytes)
+    kind: str  # 'board', 'card' (question cards are cards: the same approvers answer them) or 'review'
     id: str
     title: str
     lines: list[str]
     url: str
     issue_id: str = ''
     questions: list[dict] = field(default_factory=list)  # question cards only, from the payload
+    reviewer: str = ''  # review items only: the Paperclip user the task is assigned to
 
 
 def plain(text: Any, limit: int) -> str:
@@ -392,6 +400,26 @@ def question_item(
     )
 
 
+def review_item(issue: dict, agents: dict[str, str], public: str, prefix: str) -> Item:
+    """A task waiting on a person's review: who handed it over, and a link. No buttons."""
+    ref = issue.get('identifier') or issue['id'][:8]
+    who = agents.get(issue.get('createdByAgentId') or '', 'A teammate')
+    return Item(
+        key=f'r:{issue["id"]}',
+        kind='review',
+        id=issue['id'],
+        issue_id=issue['id'],
+        title=plain(issue.get('title') or 'A task', 200),
+        lines=[f'{ref}, {who} put it in review for you'],
+        url=f'{public}/{prefix}/issues/{ref}',
+        reviewer=str(issue.get('assigneeUserId') or ''),
+    )
+
+
+def is_review(issue: dict) -> bool:
+    return issue.get('status') == 'in_review' and bool(issue.get('assigneeUserId'))
+
+
 def is_open_card(card: dict) -> bool:
     return (
         isinstance(card, dict)
@@ -416,6 +444,9 @@ def collect(pc: Paperclip, key: str, public: str) -> dict[str, Item]:
     for issue in pc.open_issues(key):
         if not (isinstance(issue, dict) and issue.get('id')):
             continue
+        if is_review(issue):
+            item = review_item(issue, agents, public, prefix)
+            items[item.key] = item
         for card in pc.cards(key, issue['id']):
             if is_open_card(card):
                 make = question_item if card['kind'] == 'ask_user_questions' else card_item
@@ -485,6 +516,8 @@ def answer_summary(questions: list[dict], answers: list[dict]) -> str:
 def link_label(item: Item) -> str:
     if item.key.startswith('q:'):
         return 'answer in Paperclip'
+    if item.kind == 'review':
+        return 'open the task in Paperclip'
     return 'open in Paperclip' if item.kind == 'board' else 'open the card in Paperclip'
 
 
@@ -562,6 +595,8 @@ def message_text(item: Item, outcome: str = '') -> str:
 def buttons(item: Item) -> list:
     if item.key.startswith('q:'):
         return []  # answered in Paperclip from Telegram for now (buttons there: a follow-up)
+    if item.kind == 'review':
+        return []  # reviewing means opening the work in Paperclip
     return [
         [
             {'text': 'Approve', 'callback_data': f'y|{item.key}'},
@@ -659,6 +694,8 @@ def slack_blocks(item: Item, mentions: list[str], outcome: str = '') -> list[dic
                 'elements': [{'type': 'mrkdwn', 'text': slack_escape(outcome)}],
             }
         )
+    elif item.kind == 'review':
+        pass  # a link only: reviewing means opening the work in Paperclip
     elif item.key.startswith('q:'):
         blocks.append(
             {
@@ -795,6 +832,12 @@ def read_answers(item: Item, values: dict) -> tuple[list[dict], dict[str, str]]:
     return answers, errors
 
 
+def notice(item: Item) -> str:
+    if item.key.startswith('q:'):
+        return 'Question for you'
+    return 'Ready for your review' if item.kind == 'review' else 'Approval needed'
+
+
 class SlackApi:
     def __init__(self, token: str):
         self.token = token
@@ -907,8 +950,7 @@ class SlackChat:
             {
                 'channel': self.channel,
                 # notification text; mentions below buzz
-                'text': f'{"Question for you" if item.key.startswith("q:") else "Approval needed"}: '
-                f'{slack_escape(item.title)}',
+                'text': f'{notice(item)}: {slack_escape(item.title)}',
                 'blocks': slack_blocks(item, mentions),
                 'unfurl_links': False,
                 'unfurl_media': False,
@@ -1027,9 +1069,10 @@ class Bot:
         current = collect(self.pc, self.cfg.reader_key, self.cfg.public_url)
         known = self.state['items']
         for key, item in current.items():
-            if key in known:
+            # A task back in review after it left is a new hand-off; anything else posts once.
+            if key in known and not (key.startswith('r:') and known[key].get('done')):
                 continue
-            allowed = [a for a in self.cfg.approvers if item.kind in a.kinds]
+            allowed = [a for a in self.cfg.approvers if self.may_see(a, item)]
             if self.cfg.label:
                 item.title = f'{self.cfg.label} · {item.title}'
             try:
@@ -1046,7 +1089,10 @@ class Bot:
             }
         for key, rec in known.items():
             if not rec.get('done') and key not in current:
-                self.close(key, 'Handled in Paperclip.')
+                self.close(
+                    key,
+                    'Out of review in Paperclip.' if key.startswith('r:') else 'Handled in Paperclip.',
+                )
         # Forget finished items after a week so the state file stays small.
         cutoff = self.now() - 7 * 86400
         for key in [
@@ -1056,6 +1102,12 @@ class Bot:
         ]:
             del known[key]
         self.save_state()
+
+    @staticmethod
+    def may_see(a: Approver, item: Item) -> bool:
+        if item.kind not in a.kinds:
+            return False
+        return item.kind != 'review' or not a.paperclip_user_id or a.paperclip_user_id == item.reviewer
 
     def close(self, key: str, outcome: str) -> None:
         rec = self.state['items'][key]
@@ -1094,7 +1146,7 @@ class Bot:
         if choice == 's' and key.startswith('q:') and rec is not None:
             self.answer_press(p, key, rec, who)
             return
-        if choice not in ('y', 'n') or rec is None or key.startswith('q:'):
+        if choice not in ('y', 'n') or rec is None or key.startswith(('q:', 'r:')):
             p.reply('That item is no longer tracked.')
             return
         if who is None or rec['kind'] not in who.kinds:

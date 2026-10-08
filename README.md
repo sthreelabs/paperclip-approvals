@@ -1,8 +1,9 @@
 # paperclip-approvals
 
 Approve [Paperclip](https://github.com/paperclipai/paperclip) work from Slack or Telegram: hires,
-budgets, strategy decisions, confirmation cards, and questions your agents ask you. One Python file,
-no AI in it, and nothing listening on the internet.
+budgets, strategy decisions, confirmation cards, and questions your agents ask you, plus a heads-up
+when an agent hands you a task to review. One Python file, no AI in it, and nothing listening on the
+internet.
 
 ```
 Paperclip ──(poll every 20 s, read-only key)──▶ bot ──▶ Slack channel / Telegram DM
@@ -53,7 +54,8 @@ The bot is built so that nothing it reads can steer it.
   to "Handled in Paperclip." instead.
 - **Approvers are a fixed list.** A press counts only from a listed Telegram or Slack user ID, and
   only for the kinds of item that person may decide (`board`, `card`, or both). Everyone else gets a
-  private "only an approver can decide this", and the refusal is logged.
+  private "only an approver can decide this", and the refusal is logged. Review notices (`review`)
+  have no buttons at all, so they can't decide anything.
 - **It doesn't read conversation.** On Telegram it ignores typed text except `/start` in a private
   chat (which replies with your ID for setup). On Slack the app has only `chat:write`, no event
   subscriptions, and sees only its own buttons and forms.
@@ -71,9 +73,10 @@ The bot is built so that nothing it reads can steer it.
 | Board approvals: hire, budget override, CEO strategy, board decision | Message with **Approve** / **Not now** |
 | Confirmation cards (`request_confirmation`) on any open task | Message with **Approve** / **Not now** (a decline reason is sent where the card requires one) |
 | Question cards (`ask_user_questions`) | Slack: an **Answer** button opens a form with each question as radio buttons, checkboxes or a menu, plus a free-text box where the card allows it. Telegram: the questions with a link to answer in Paperclip. |
+| Tasks an agent put **In review** and assigned to a person (opt-in: the `review` kind) | A notice with a link to the task and no buttons, since reviewing means opening the work. Posted again if the task comes back to review later. |
 
 Messages edit themselves once decided ("✅ Approved by Alex · 9:41 PM", "Not now · Alex", "✅ Answered
-by Alex: …", or "Handled in Paperclip.") and drop their buttons.
+by Alex: …", "Handled in Paperclip.", or "Out of review in Paperclip.") and drop their buttons.
 
 ## Alternatives
 
@@ -85,7 +88,7 @@ for your agents, use those.
 
 This bot is deliberately narrower:
 
-- approvals and questions only, with no commands, so there's less to secure;
+- approvals, questions and review notices only, with no commands, so there's less to secure;
 - a separate process outside Paperclip, using only outbound connections;
 - every decision made with the presser's own Paperclip key, rather than one shared token;
 - every press re-checked against Paperclip before acting;
@@ -123,13 +126,18 @@ Add each approver's key under the name their `key_env` points to, plus the chat 
 
 ```json
 [
-  {"name": "Alex", "slack_user_id": "U0123ABCD", "key_env": "PAPERCLIP_KEY_ALEX", "kinds": ["board", "card"]},
+  {"name": "Alex", "slack_user_id": "U0123ABCD", "key_env": "PAPERCLIP_KEY_ALEX", "kinds": ["board", "card", "review"],
+   "paperclip_user_id": "<Alex's Paperclip user ID>"},
   {"name": "Sam", "slack_user_id": "U0456EFGH", "key_env": "PAPERCLIP_KEY_SAM", "kinds": ["card"]}
 ]
 ```
 
 Use `telegram_id` instead of `slack_user_id` for Telegram mode. Items no listed approver may decide
 are never posted.
+
+`review` is opt-in: with it, a task an agent moves to In review and assigns to a person gets a notice.
+`paperclip_user_id` is optional; set it so an approver is mentioned only for tasks assigned to them
+(it's the task's `assigneeUserId`). Without it, the approver is mentioned for every review.
 
 ### Slack
 
