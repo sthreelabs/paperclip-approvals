@@ -706,3 +706,96 @@ def test_plain_keeps_its_formatting_rules():
     assert ap.plain('see [the doc](https://x.example/doc)\nthen  done', 200) == 'see the doc then  done'
     assert ap.plain('x' * 50, 10) == 'x' * 9 + '…'
     assert ap.plain(None, 10) == ''
+
+
+# --- review hand-offs -----------------------------------------------------------------------------
+PC_ME = 'user-alex'
+REVIEW_TASK = {'id': 'i86', 'identifier': 'ACME-86', 'status': 'in_review', 'assigneeUserId': PC_ME,
+               'createdByAgentId': 'lead', 'title': 'Create the launch deck (PPTX)'}
+
+
+def with_review(b, pc):
+    b.cfg.approvers[0].kinds = {'board', 'card', 'review'}
+    pc.issues['i86'] = dict(REVIEW_TASK)
+
+
+def test_a_task_in_review_for_a_person_is_posted_with_a_link_and_no_buttons(slack_bot):
+    b, pc, api = slack_bot
+    with_review(b, pc)
+    b.sync()
+    [post] = [p for p in api.of('chat.postMessage') if 'launch deck' in p['text']]
+    assert post['text'] == 'Ready for your review: Create the launch deck (PPTX)'
+    text = post['blocks'][0]['text']['text']
+    assert text.startswith('<@U0APPROVER1> 🟡 *Create the launch deck')
+    assert 'ACME-86, Lee put it in review for you' in text
+    assert '<https://p.example/ACME/issues/ACME-86|open the task in Paperclip>' in text
+    assert all(blk['type'] != 'actions' for blk in post['blocks'])
+    b.sync()
+    assert len([p for p in api.of('chat.postMessage') if 'launch deck' in p['text']]) == 1
+
+
+def test_review_items_need_the_review_kind(slack_bot):
+    b, pc, api = slack_bot
+    pc.issues['i86'] = dict(REVIEW_TASK)  # Alex has board + card only
+    b.sync()
+    assert not any('launch deck' in p['text'] for p in api.of('chat.postMessage'))
+
+
+def test_tasks_in_review_for_an_agent_are_not_posted(slack_bot):
+    # The fixture's ACME-38 is in review with no person assigned; only its card is posted.
+    b, pc, api = slack_bot
+    b.cfg.approvers[0].kinds = {'board', 'card', 'review'}
+    b.sync()
+    assert [p['text'] for p in api.of('chat.postMessage')] == ['Approval needed: OK to send &lt;the hello&gt;?']
+
+
+def test_a_review_closes_when_the_task_leaves_review_and_reposts_if_it_returns(slack_bot):
+    b, pc, api = slack_bot
+    with_review(b, pc)
+    b.sync()
+    pc.issues['i86']['status'] = 'done'
+    b.sync()
+    [upd] = api.of('chat.update')
+    assert 'Out of review in Paperclip.' in upd['blocks'][1]['elements'][0]['text']
+    pc.issues['i86']['status'] = 'in_review'
+    b.sync()
+    assert len([p for p in api.of('chat.postMessage') if 'launch deck' in p['text']]) == 2
+    assert b.state['items']['r:i86']['done'] is False
+
+
+def test_a_paperclip_user_id_limits_reviews_to_that_persons_own(slack_bot):
+    b, pc, api = slack_bot
+    with_review(b, pc)
+    b.cfg.approvers[0].paperclip_user_id = 'someone-else'
+    b.sync()
+    assert not any('launch deck' in p['text'] for p in api.of('chat.postMessage'))
+    b.state['items'].clear()
+    b.cfg.approvers[0].paperclip_user_id = PC_ME
+    b.sync()
+    assert any('launch deck' in p['text'] for p in api.of('chat.postMessage'))
+
+
+def test_review_items_cannot_be_approved_with_a_forged_press(slack_bot):
+    b, pc, api = slack_bot
+    with_review(b, pc)
+    b.sync()
+    slack_press(b, SLACK_ME, 'y|r:i86')
+    assert pc.decisions == [] and b.state['items']['r:i86']['done'] is False
+
+
+def test_telegram_shows_review_items_without_buttons(bot):
+    b, pc, tg = bot
+    with_review(b, pc)
+    b.sync()
+    [sent] = [s for s in tg.sent if 'launch deck' in s[1]]
+    assert sent[0] == ME and not sent[2]
+    assert 'open the task in Paperclip' in sent[1]
+
+
+def test_config_reads_review_kind_and_paperclip_user_id(tmp_path):
+    approvers = tmp_path / 'approvers.json'
+    approvers.write_text(json.dumps([{'name': 'C', 'telegram_id': 1, 'key_env': 'K1',
+                                      'kinds': ['card', 'review'], 'paperclip_user_id': PC_ME}]))
+    cfg = ap.load_config({'TELEGRAM_BOT_TOKEN': 't', 'PAPERCLIP_API_URL': 'https://p', 'PAPERCLIP_COMPANY_ID': 'co',
+                          'APPROVERS_FILE': str(approvers), 'READER_KEY_ENV': 'K1', 'K1': 's'})
+    assert cfg.approvers[0].kinds == {'card', 'review'} and cfg.approvers[0].paperclip_user_id == PC_ME
