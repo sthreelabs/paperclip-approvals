@@ -57,7 +57,8 @@ The bot is built so that nothing it reads can steer it.
   private "only an approver can decide this", and the refusal is logged. Review notices (`review`)
   have no buttons at all, so they can't decide anything.
 - **It doesn't read conversation.** On Telegram it ignores typed text except `/start` in a private
-  chat (which replies with your ID for setup). On Slack the app has only `chat:write`, no event
+  chat (which replies with your ID for setup). On Slack the app has only `chat:write` (plus
+  `files:write`, used only to attach review files), no event
   subscriptions, and sees only its own buttons and forms.
 - **Outbound only.** No webhook, no open port, no public URL.
 - **Fails closed.** Any error leaves the item pending in Paperclip, with a private note to the
@@ -73,7 +74,7 @@ The bot is built so that nothing it reads can steer it.
 | Board approvals: hire, budget override, CEO strategy, board decision | Message with **Approve** / **Not now** |
 | Confirmation cards (`request_confirmation`) on any open task | Message with **Approve** / **Not now** (a decline reason is sent where the card requires one) |
 | Question cards (`ask_user_questions`) | Slack: an **Answer** button opens a form with each question as radio buttons, checkboxes or a menu, plus a free-text box where the card allows it. Telegram: the questions with a link to answer in Paperclip. |
-| Tasks an agent put **In review** and assigned to a person (opt-in: the `review` kind) | A notice with a link to the task and no buttons, since reviewing means opening the work. Posted again if the task comes back to review later. |
+| Tasks an agent put **In review** and assigned to a person (opt-in: the `review` kind) | A notice with a link to the task and no buttons, since reviewing means opening the work. Posted again if the task comes back to review later. On Slack, the task's files can be attached in the notice's thread (opt-in, see below). |
 
 Messages edit themselves once decided ("✅ Approved by Alex · 9:41 PM", "Not now · Alex", "✅ Answered
 by Alex: …", "Handled in Paperclip.", or "Out of review in Paperclip.") and drop their buttons.
@@ -139,6 +140,17 @@ are never posted.
 `paperclip_user_id` is optional; set it so an approver is mentioned only for tasks assigned to them
 (it's the task's `assigneeUserId`). Without it, the approver is mentioned for every review.
 
+**Review files (Slack, opt-in).** Set `APPROVALS_REVIEW_FILES=on` and each new review notice gets the
+work itself as replies in its thread, so it opens on a phone even when Paperclip is only reachable on
+your own network. The bot sends the task's latest hand-off: the attachments from the agent run that
+added the newest file, so a task holding v1 to v4 sends only v4. If the task has no files of its own
+(a lead agent often puts the parent task in review while the deliverable sits on a teammate's
+subtask), it sends each subtask's latest hand-off instead. Files a person uploaded and cancelled
+subtasks are skipped. At most 5 files of up to 25 MB each are attached; anything else, and any upload
+that fails, is named in a thread reply with the task link. This copies the files into Slack, so it's
+off by default. It needs the `files:write` scope, which the manifest includes; an app created before
+this needs the scope added and a reinstall.
+
 ### Slack
 
 1. Create the app from `deploy/slack-app-manifest.yaml` (api.slack.com/apps > Create New App > From
@@ -179,6 +191,7 @@ All settings are listed in the docstring at the top of `approvals.py`.
 | Decide a confirmation card | `POST /api/issues/:id/interactions/:cardId/accept` · `/reject` |
 | Answer a question card | `POST /api/issues/:id/interactions/:cardId/respond` |
 | Clear a decided approval from the approver's inbox | `POST /api/companies/:id/inbox-dismissals` |
+| Review files: a task's subtasks, attachments and file contents | `GET /api/companies/:id/issues?parentId=…`, `GET /api/issues/:id/attachments`, `GET /api/attachments/:id/content` |
 
 ## Tests
 

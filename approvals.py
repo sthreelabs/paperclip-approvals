@@ -12,7 +12,10 @@ What it shows (polled every POLL_SECONDS):
          cards a teammate raised for a person (ask_user_questions)
   review a task a teammate put In review and assigned to a person. Posted once with a link and no
          buttons (reviewing means opening the work), closed when the task leaves review, and
-         posted again if it comes back to review later
+         posted again if it comes back to review later. With APPROVALS_REVIEW_FILES=on (Slack),
+         the files from the task's latest hand-off (or, if it has none, from each subtask's, where
+         a lead's teammates attach their work) are uploaded in the notice's thread, so the work
+         opens anywhere, not just on the network Paperclip is on
 
 Where it posts:
   telegram  a direct message to each approver allowed that kind
@@ -36,7 +39,8 @@ Socket Mode are both outbound: nothing has to reach it from the internet.
 Configuration (environment, never logged):
   APPROVALS_CHAT           telegram (default) or slack
   TELEGRAM_BOT_TOKEN       telegram: the bot's token from BotFather
-  SLACK_BOT_TOKEN          slack: the app's bot token (xoxb-…, scope chat:write)
+  SLACK_BOT_TOKEN          slack: the app's bot token (xoxb-…, scope chat:write; files:write too
+                           for APPROVALS_REVIEW_FILES)
   SLACK_APP_TOKEN          slack: the app-level token for Socket Mode (xapp-…, connections:write)
   SLACK_APPROVALS_CHANNEL  slack: channel ID to post in (the bot must be a member)
   PAPERCLIP_API_URL        e.g. https://paperclip.example.com
@@ -51,6 +55,8 @@ Configuration (environment, never logged):
   APPROVALS_TZ             time zone for "Approved by … · 9:41 PM"; default America/New_York
   APPROVALS_LABEL          optional prefix for every item, e.g. the company ("Acme · Hire: …"),
                            when several Paperclip companies post into one channel
+  APPROVALS_REVIEW_FILES   on: attach a review task's latest files in the notice's thread (Slack
+                           only; off by default, since it copies the files into Slack)
 
   approvals.py            run the bot
   approvals.py --once     one sync pass, then exit (setup check)
@@ -68,6 +74,7 @@ import re
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
 from html import escape
@@ -78,6 +85,9 @@ from zoneinfo import ZoneInfo
 POLL_SECONDS = 20
 NOT_NOW_REASON = 'Not now (declined in chat via the approvals bot).'
 TIMEOUT = 15
+UPLOAD_TIMEOUT = 120
+REVIEW_FILES_MAX = 5  # files attached per review notice; the rest are named with a link
+REVIEW_FILE_BYTES = 25 * 1024 * 1024
 KINDS = {'board', 'card', 'review'}
 CHATS = {'telegram', 'slack'}
 OPEN_STATUSES = 'backlog,todo,in_progress,in_review,blocked'
@@ -104,6 +114,31 @@ class ApiError(Exception):
 
 
 # --- HTTP -----------------------------------------------------------------------------------------
+def request_bytes(
+    url: str,
+    method: str = 'GET',
+    data: bytes | None = None,
+    headers: dict | None = None,
+    timeout: float = TIMEOUT,
+    limit: int | None = None,
+) -> bytes:
+    """One HTTP call, raw. With a limit, a longer response is refused rather than read whole."""
+    req = urllib.request.Request(url, data=data, method=method)
+    for k, v in (headers or {}).items():
+        req.add_header(k, v)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read() if limit is None else resp.read(limit + 1)
+    except urllib.error.HTTPError as exc:
+        detail = exc.read()[:300].decode(errors='replace')
+        raise ApiError(f'{method} {redact(url)} failed ({exc.code}): {detail}') from exc
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        raise ApiError(f'{method} {redact(url)} failed: {exc}') from exc
+    if limit is not None and len(raw) > limit:
+        raise ApiError(f'{method} {redact(url)} returned more than {limit} bytes')
+    return raw
+
+
 def request_json(
     url: str,
     method: str = 'GET',
@@ -112,20 +147,10 @@ def request_json(
     timeout: float = TIMEOUT,
 ) -> Any:
     data = json.dumps(body).encode() if body is not None else None
-    req = urllib.request.Request(url, data=data, method=method)
-    req.add_header('Accept', 'application/json')
+    sent = {'Accept': 'application/json'}
     if data is not None:
-        req.add_header('Content-Type', 'application/json; charset=utf-8')
-    for k, v in (headers or {}).items():
-        req.add_header(k, v)
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            raw = resp.read()
-    except urllib.error.HTTPError as exc:
-        detail = exc.read()[:300].decode(errors='replace')
-        raise ApiError(f'{method} {redact(url)} failed ({exc.code}): {detail}') from exc
-    except (urllib.error.URLError, TimeoutError, OSError) as exc:
-        raise ApiError(f'{method} {redact(url)} failed: {exc}') from exc
+        sent['Content-Type'] = 'application/json; charset=utf-8'
+    raw = request_bytes(url, method, data, {**sent, **(headers or {})}, timeout)
     try:
         return json.loads(raw) if raw else None
     except ValueError as exc:
@@ -171,6 +196,26 @@ class Paperclip:
 
     def cards(self, key: str, issue_id: str) -> list[dict]:
         return as_list(self.call(key, 'GET', f'/issues/{issue_id}/interactions'))
+
+    def attachments(self, key: str, issue_id: str) -> list[dict]:
+        return as_list(self.call(key, 'GET', f'/issues/{issue_id}/attachments'))
+
+    def subtasks(self, key: str, issue_id: str) -> list[dict]:
+        # Checked here too: a Paperclip that ignored the filter would return every task.
+        return [
+            i for i in as_list(
+                self.call(key, 'GET', f'/companies/{self.company}/issues?parentId={issue_id}')
+            )
+            if isinstance(i, dict) and i.get('parentId') == issue_id and i.get('id')
+        ]
+
+    def download(self, key: str, attachment_id: str, limit: int) -> bytes:
+        return request_bytes(
+            f'{self.base}/attachments/{attachment_id}/content',
+            headers={'Authorization': f'Bearer {key}'},
+            timeout=UPLOAD_TIMEOUT,
+            limit=limit,
+        )
 
     def agents(self, key: str) -> dict[str, str]:
         return {
@@ -219,6 +264,7 @@ class Config:
     slack_app_token: str = field(default='', repr=False)
     slack_channel: str = ''
     label: str = ''  # e.g. the company's name, when several boards share one channel
+    review_files: bool = False  # Slack: attach a review task's latest files
 
 
 def load_config(env: dict[str, str] | None = None) -> Config:
@@ -277,6 +323,7 @@ def load_config(env: dict[str, str] | None = None) -> Config:
         slack_app_token=need('SLACK_APP_TOKEN') if slack else '',
         slack_channel=need('SLACK_APPROVALS_CHANNEL') if slack else '',
         label=(env.get('APPROVALS_LABEL') or '').strip(),
+        review_files=(env.get('APPROVALS_REVIEW_FILES') or '').strip().lower() in ('on', '1', 'true', 'yes'),
     )
 
 
@@ -414,6 +461,28 @@ def review_item(issue: dict, agents: dict[str, str], public: str, prefix: str) -
         url=f'{public}/{prefix}/issues/{ref}',
         reviewer=str(issue.get('assigneeUserId') or ''),
     )
+
+
+def latest_handoff(attachments: list) -> list[dict]:
+    """The files to attach to a review notice: the ones from the agent run that added the newest
+    file. A hand-off's files share a run, so a task holding v1 to v4 sends only v4. Files a person
+    uploaded are left out: the reviewer has those already."""
+    made = [
+        a for a in attachments
+        if isinstance(a, dict) and a.get('id') and a.get('createdByAgentId')
+    ]
+    if not made:
+        return []
+    newest = max(made, key=lambda a: str(a.get('createdAt') or ''))
+    run = newest.get('originatingRunId')
+    batch = [a for a in made if run and a.get('originatingRunId') == run] or [newest]
+    return sorted(batch, key=lambda a: str(a.get('createdAt') or ''))
+
+
+def file_name(a: dict) -> str:
+    """An agent picks the file name, so keep it to a short, plain base name."""
+    name = re.sub(r'[\x00-\x1f/\\]', '', str(a.get('originalFilename') or '')).strip()
+    return name[-120:] or f'file-{str(a.get("id"))[:8]}'
 
 
 def is_review(issue: dict) -> bool:
@@ -849,6 +918,34 @@ class SlackApi:
             body,
             {'Authorization': f'Bearer {self.token}'},
         )
+        return self.checked(method, out)
+
+    def form(self, method: str, fields: dict) -> dict:
+        """The file-upload methods take form fields, not JSON."""
+        raw = request_bytes(
+            f'https://slack.com/api/{method}',
+            'POST',
+            urllib.parse.urlencode(fields).encode(),
+            {
+                'Authorization': f'Bearer {self.token}',
+                'Content-Type': 'application/x-www-form-urlencoded',
+            },
+        )
+        try:
+            out = json.loads(raw)
+        except ValueError as exc:
+            raise ApiError(f'Slack {method} returned non-JSON') from exc
+        return self.checked(method, out)
+
+    @staticmethod
+    def upload(url: str, data: bytes) -> None:
+        # The upload URL is single-use and already authorized; it takes the raw bytes.
+        request_bytes(
+            url, 'POST', data, {'Content-Type': 'application/octet-stream'}, UPLOAD_TIMEOUT
+        )
+
+    @staticmethod
+    def checked(method: str, out: Any) -> dict:
         if not (isinstance(out, dict) and out.get('ok')):
             raise ApiError(f'Slack {method} failed: {(out or {}).get("error", out)}')
         return out
@@ -957,6 +1054,25 @@ class SlackChat:
             },
         )
         return [[out['channel'], out['ts']]]
+
+    def attach(self, ref: list, name: str, data: bytes) -> None:
+        """One file as a reply in the thread of the message at ref."""
+        slot = self.api.form('files.getUploadURLExternal', {'filename': name, 'length': len(data)})
+        self.api.upload(slot['upload_url'], data)
+        self.api.form(
+            'files.completeUploadExternal',
+            {
+                'files': json.dumps([{'id': slot['file_id'], 'title': name}]),
+                'channel_id': ref[0],
+                'thread_ts': ref[1],
+            },
+        )
+
+    def reply(self, ref: list, text: str) -> None:
+        self.api.call(
+            'chat.postMessage',
+            {'channel': ref[0], 'thread_ts': ref[1], 'text': text, 'unfurl_links': False},
+        )
 
     def update(self, ref: list, item: Item, outcome: str) -> None:
         self.api.call(
@@ -1087,6 +1203,8 @@ class Bot:
                 'messages': sent,
                 'done': False,
             }
+            if item.kind == 'review' and sent and self.cfg.review_files:
+                self.attach_files(item, sent[0])
         for key, rec in known.items():
             if not rec.get('done') and key not in current:
                 self.close(
@@ -1102,6 +1220,55 @@ class Bot:
         ]:
             del known[key]
         self.save_state()
+
+    def attach_files(self, item: Item, ref: list) -> None:
+        """Upload the latest hand-off's files under a review notice (Slack only). A failure is
+        logged and the file named with the link; the notice itself stands either way."""
+        if not hasattr(self.chat, 'attach'):
+            return
+        key = self.cfg.reader_key
+        try:
+            files = latest_handoff(self.pc.attachments(key, item.issue_id))
+            if not files:
+                # A lead agent puts the parent in review while the deck sits on a teammate's
+                # subtask. Files on the parent itself are the final set, so subtasks come second.
+                subtasks = sorted(
+                    self.pc.subtasks(key, item.issue_id), key=lambda t: str(t.get('createdAt') or '')
+                )
+                files = [
+                    a
+                    for t in subtasks
+                    if t.get('status') != 'cancelled'
+                    for a in latest_handoff(self.pc.attachments(key, t['id']))
+                ]
+        except ApiError as exc:
+            log(f'could not list the files on {item.key}: {exc}')
+            return
+        left = []
+        for i, a in enumerate(files):
+            name = file_name(a)
+            size = a.get('byteSize')
+            if i >= REVIEW_FILES_MAX:
+                left.append(name)
+                continue
+            if isinstance(size, int) and size > REVIEW_FILE_BYTES:
+                left.append(f'{name} (too big to attach)')
+                continue
+            try:
+                data = self.pc.download(key, a['id'], REVIEW_FILE_BYTES)
+                self.chat.attach(ref, name, data)
+            except ApiError as exc:
+                log(f'could not attach {name} to {item.key}: {exc}')
+                left.append(f'{name} (could not attach)')
+        if left:
+            try:
+                self.chat.reply(
+                    ref,
+                    'Also on the task: ' + ', '.join(slack_escape(n) for n in left)
+                    + f'. <{item.url}|Open the task in Paperclip>',
+                )
+            except ApiError as exc:
+                log(f'could not post the file note for {item.key}: {exc}')
 
     @staticmethod
     def may_see(a: Approver, item: Item) -> bool:
