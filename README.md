@@ -2,8 +2,9 @@
 
 Approve [Paperclip](https://github.com/paperclipai/paperclip) work from Slack or Telegram: hires,
 budgets, strategy decisions, confirmation cards, and questions your agents ask you, plus a heads-up
-when an agent hands you a task to review. One Python file, no AI in it, and nothing listening on the
-internet.
+when an agent hands you a task to review. On Slack, a review notice can carry the work itself: the
+task's latest files arrive as replies in the thread, so you can open them on a phone without reaching
+Paperclip. One Python file, no AI in it, and nothing listening on the internet.
 
 ```
 Paperclip ──(poll every 20 s, read-only key)──▶ bot ──▶ Slack channel / Telegram DM
@@ -78,6 +79,13 @@ The bot is built so that nothing it reads can steer it.
 
 Messages edit themselves once decided ("✅ Approved by Alex · 9:41 PM", "Not now · Alex", "✅ Answered
 by Alex: …", "Handled in Paperclip.", or "Out of review in Paperclip.") and drop their buttons.
+
+### Review files in the Slack thread
+
+Turn on `APPROVALS_REVIEW_FILES` and each new review notice gets the task's latest hand-off as
+file replies in its thread: the newest version only, taken from a subtask when the parent task has
+no files of its own, at most 5 files of up to 25 MB each. It copies files into Slack, so it is off
+by default and needs the `files:write` scope. Details are under [Setup](#setup).
 
 ## Alternatives
 
