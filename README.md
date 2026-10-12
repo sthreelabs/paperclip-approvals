@@ -28,8 +28,15 @@ Once decided, the message says who decided and the buttons go away:
 
 <img src="docs/decided.png" width="520" alt="Slack message for a confirmation card, marked Approved by Alex">
 
-<sub>Rendered from the bot's own message code with example data, using Slack's Block Kit Builder. In
-your workspace the sender shows as your app's name instead of "Your App".</sub>
+An agent hands you work to review. With review files turned on, the files arrive in the notice's
+thread:
+
+<img src="docs/review-files.png" width="420" alt="Slack thread: a review notice for task ACME-41 from Helper, with a PDF and a chart image attached as replies">
+
+<sub>The first four are rendered from the bot's own message code with example data, using Slack's
+Block Kit Builder. In your workspace the sender shows as your app's name instead of "Your App". The
+review thread is a capture from a Slack workspace: this bot's code posted it, with example data and
+example files.</sub>
 
 ## Why
 
